@@ -1118,7 +1118,15 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         var rid = GetPortableRid()
             ?? Path.GetFileName(System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier);
         searchedPath = Path.Combine(AppContext.BaseDirectory, "runtimes", rid, "native", binaryName);
-        return File.Exists(searchedPath) ? searchedPath : null;
+        if (File.Exists(searchedPath))
+            return searchedPath;
+
+        // Fallback: check app base directory directly (e.g., MAUI MonoBundle flat layout)
+        var flatPath = Path.Combine(AppContext.BaseDirectory, binaryName);
+        if (File.Exists(flatPath))
+            return flatPath;
+
+        return null;
     }
 
     private static string? GetPortableRid()

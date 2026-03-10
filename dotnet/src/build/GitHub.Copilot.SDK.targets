@@ -114,4 +114,23 @@
                              CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
+
+  <!-- For MAUI apps, ContentWithTargetPath items need PublishFolderType to be included
+       in the app bundle. Without this metadata, MAUI's bundling step skips the CLI binary.
+       PublishFolderType="Assembly" places it in MonoBundle (maccatalyst) or the app root (iOS). -->
+  <Target Name="_SetCopilotCliMauiBundling" AfterTargets="_RegisterCopilotCliForCopy"
+          Condition="'$(UseMaui)' == 'true' And '$(_CopilotPlatform)' != ''">
+    <PropertyGroup>
+      <_CopilotCacheDir>$(IntermediateOutputPath)copilot-cli/$(CopilotCliVersion)/$(_CopilotPlatform)</_CopilotCacheDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <!-- Remove and re-add with PublishFolderType so MAUI includes the binary in the app bundle -->
+      <ContentWithTargetPath Remove="$(_CopilotCacheDir)/$(_CopilotBinary)" />
+      <ContentWithTargetPath Remove="$(_CopilotCacheDir)\$(_CopilotBinary)" />
+      <ContentWithTargetPath Include="$(_CopilotCacheDir)/$(_CopilotBinary)"
+                             TargetPath="runtimes/$(_CopilotRid)/native/$(_CopilotBinary)"
+                             CopyToOutputDirectory="PreserveNewest"
+                             PublishFolderType="Assembly" />
+    </ItemGroup>
+  </Target>
 </Project>
