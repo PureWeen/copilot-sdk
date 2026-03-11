@@ -65,6 +65,14 @@ export class CopilotSession {
     private userInputHandler?: UserInputHandler;
     private hooks?: SessionHooks;
     private _rpc: ReturnType<typeof createSessionRpc> | null = null;
+    private _turnEndFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+    /**
+     * Grace period in milliseconds before synthesizing a `session.idle` event
+     * after `assistant.turn_end` is received without a subsequent `session.idle`.
+     * @internal Exposed for testing; not part of the public API.
+     */
+    _idleFallbackDelayMs: number = 5000;
 
     /**
      * Creates a new CopilotSession instance.
@@ -291,6 +299,14 @@ export class CopilotSession {
      * @internal This method is for internal use by the SDK.
      */
     _dispatchEvent(event: SessionEvent): void {
+        // Idle fallback: if turn_end arrives but session.idle never follows,
+        // synthesize a session.idle after a grace period so consumers don't hang.
+        if (event.type === "assistant.turn_end") {
+            this._startIdleFallbackTimer();
+        } else if (event.type === "session.idle") {
+            this._cancelIdleFallbackTimer();
+        }
+
         // Handle broadcast request events internally (fire-and-forget)
         this._handleBroadcastEvent(event);
 
@@ -345,6 +361,39 @@ export class CopilotSession {
             if (this.permissionHandler) {
                 void this._executePermissionAndRespond(requestId, permissionRequest);
             }
+        }
+    }
+
+    /**
+     * Starts an idle-fallback timer after receiving `assistant.turn_end`.
+     * If `session.idle` does not arrive within the grace period, a synthetic
+     * `session.idle` event is dispatched so that `sendAndWait` and other
+     * consumers waiting on idle do not hang indefinitely.
+     * @internal
+     */
+    private _startIdleFallbackTimer(): void {
+        this._cancelIdleFallbackTimer();
+        this._turnEndFallbackTimer = setTimeout(() => {
+            this._turnEndFallbackTimer = undefined;
+            this._dispatchEvent({
+                id: `synthetic-idle-${Date.now()}`,
+                timestamp: new Date().toISOString(),
+                parentId: null,
+                ephemeral: true,
+                type: "session.idle",
+                data: {},
+            } as SessionEvent);
+        }, this._idleFallbackDelayMs);
+    }
+
+    /**
+     * Cancels any pending idle-fallback timer (e.g. when a real `session.idle` arrives).
+     * @internal
+     */
+    private _cancelIdleFallbackTimer(): void {
+        if (this._turnEndFallbackTimer !== undefined) {
+            clearTimeout(this._turnEndFallbackTimer);
+            this._turnEndFallbackTimer = undefined;
         }
     }
 
@@ -626,6 +675,7 @@ export class CopilotSession {
      * ```
      */
     async disconnect(): Promise<void> {
+        this._cancelIdleFallbackTimer();
         await this.connection.sendRequest("session.destroy", {
             sessionId: this.sessionId,
         });

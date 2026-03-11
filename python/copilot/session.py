@@ -97,6 +97,10 @@ class CopilotSession:
         self._hooks: SessionHooks | None = None
         self._hooks_lock = threading.Lock()
         self._rpc: SessionRpc | None = None
+        self._idle_fallback_task: asyncio.TimerHandle | None = None
+        # Grace period (seconds) before synthesizing session.idle after turn_end.
+        # Exposed for testing; not part of the public API.
+        self._idle_fallback_delay: float = 5.0
 
     @property
     def rpc(self) -> SessionRpc:
@@ -258,6 +262,13 @@ class CopilotSession:
         Args:
             event: The session event to dispatch to all handlers.
         """
+        # Idle fallback: if turn_end arrives but session.idle never follows,
+        # synthesize a session.idle after a grace period so consumers don't hang.
+        if event.type == SessionEventType.ASSISTANT_TURN_END:
+            self._start_idle_fallback_timer()
+        elif event.type == SessionEventType.SESSION_IDLE:
+            self._cancel_idle_fallback_timer()
+
         # Handle broadcast request events (protocol v3) before dispatching to user handlers.
         # Fire-and-forget: the response is sent asynchronously via RPC.
         self._handle_broadcast_event(event)
@@ -270,6 +281,41 @@ class CopilotSession:
                 handler(event)
             except Exception as e:
                 print(f"Error in session event handler: {e}")
+
+    def _start_idle_fallback_timer(self) -> None:
+        """Start a timer that synthesizes session.idle if one doesn't arrive after turn_end."""
+        self._cancel_idle_fallback_timer()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._idle_fallback_task = loop.call_later(
+            self._idle_fallback_delay, self._fire_idle_fallback
+        )
+
+    def _cancel_idle_fallback_timer(self) -> None:
+        """Cancel any pending idle-fallback timer."""
+        if self._idle_fallback_task is not None:
+            self._idle_fallback_task.cancel()
+            self._idle_fallback_task = None
+
+    def _fire_idle_fallback(self) -> None:
+        """Synthesize and dispatch a session.idle event."""
+        from datetime import datetime, timezone
+        from uuid import uuid4
+
+        from .generated.session_events import Data
+
+        self._idle_fallback_task = None
+        synthetic_idle = SessionEvent(
+            data=Data(),
+            id=uuid4(),
+            timestamp=datetime.now(timezone.utc),
+            type=SessionEventType.SESSION_IDLE,
+            ephemeral=True,
+            parent_id=None,
+        )
+        self._dispatch_event(synthetic_idle)
 
     def _handle_broadcast_event(self, event: SessionEvent) -> None:
         """Handle broadcast request events by executing local handlers and responding via RPC.
@@ -658,6 +704,7 @@ class CopilotSession:
             >>> # Clean up when done — session can still be resumed later
             >>> await session.disconnect()
         """
+        self._cancel_idle_fallback_timer()
         await self._client.request("session.destroy", {"sessionId": self.session_id})
         with self._event_handlers_lock:
             self._event_handlers.clear()

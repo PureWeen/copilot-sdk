@@ -65,6 +65,12 @@ type Session struct {
 	hooks             *SessionHooks
 	hooksMux          sync.RWMutex
 
+	// idleFallbackDelay is the grace period after assistant.turn_end before
+	// synthesizing a session.idle event. Defaults to 5 seconds. Exposed for testing.
+	idleFallbackDelay time.Duration
+	idleFallbackTimer *time.Timer
+	idleFallbackMux   sync.Mutex
+
 	// RPC provides typed session-scoped RPC methods.
 	RPC *rpc.SessionRpc
 }
@@ -79,12 +85,13 @@ func (s *Session) WorkspacePath() string {
 // newSession creates a new session wrapper with the given session ID and client.
 func newSession(sessionID string, client *jsonrpc2.Client, workspacePath string) *Session {
 	return &Session{
-		SessionID:     sessionID,
-		workspacePath: workspacePath,
-		client:        client,
-		handlers:      make([]sessionHandler, 0),
-		toolHandlers:  make(map[string]ToolHandler),
-		RPC:           rpc.NewSessionRpc(client, sessionID),
+		SessionID:         sessionID,
+		workspacePath:     workspacePath,
+		client:            client,
+		handlers:          make([]sessionHandler, 0),
+		toolHandlers:      make(map[string]ToolHandler),
+		idleFallbackDelay: 5 * time.Second,
+		RPC:               rpc.NewSessionRpc(client, sessionID),
 	}
 }
 
@@ -439,6 +446,14 @@ func (s *Session) handleHooksInvoke(hookType string, rawInput json.RawMessage) (
 // This is an internal method; handlers are called synchronously and any panics
 // are recovered to prevent crashing the event dispatcher.
 func (s *Session) dispatchEvent(event SessionEvent) {
+	// Idle fallback: if turn_end arrives but session.idle never follows,
+	// synthesize a session.idle after a grace period so consumers don't hang.
+	if event.Type == AssistantTurnEnd {
+		s.startIdleFallbackTimer()
+	} else if event.Type == SessionIdle {
+		s.cancelIdleFallbackTimer()
+	}
+
 	// Handle broadcast request events internally (fire-and-forget)
 	s.handleBroadcastEvent(event)
 
@@ -459,6 +474,37 @@ func (s *Session) dispatchEvent(event SessionEvent) {
 			}()
 			handler(event)
 		}()
+	}
+}
+
+// startIdleFallbackTimer starts a timer that will synthesize a session.idle
+// event if one is not received within the grace period after assistant.turn_end.
+func (s *Session) startIdleFallbackTimer() {
+	s.cancelIdleFallbackTimer()
+	s.idleFallbackMux.Lock()
+	defer s.idleFallbackMux.Unlock()
+	s.idleFallbackTimer = time.AfterFunc(s.idleFallbackDelay, func() {
+		s.idleFallbackMux.Lock()
+		s.idleFallbackTimer = nil
+		s.idleFallbackMux.Unlock()
+
+		syntheticIdle := SessionEvent{
+			ID:        fmt.Sprintf("synthetic-idle-%d", time.Now().UnixMilli()),
+			Timestamp: time.Now(),
+			Type:      SessionIdle,
+			Data:      Data{},
+		}
+		s.dispatchEvent(syntheticIdle)
+	})
+}
+
+// cancelIdleFallbackTimer cancels the idle-fallback timer if one is pending.
+func (s *Session) cancelIdleFallbackTimer() {
+	s.idleFallbackMux.Lock()
+	defer s.idleFallbackMux.Unlock()
+	if s.idleFallbackTimer != nil {
+		s.idleFallbackTimer.Stop()
+		s.idleFallbackTimer = nil
 	}
 }
 
@@ -626,6 +672,7 @@ func (s *Session) GetMessages(ctx context.Context) ([]SessionEvent, error) {
 //	    log.Printf("Failed to disconnect session: %v", err)
 //	}
 func (s *Session) Disconnect() error {
+	s.cancelIdleFallbackTimer()
 	_, err := s.client.Request("session.destroy", sessionDestroyRequest{SessionID: s.SessionID})
 	if err != nil {
 		return fmt.Errorf("failed to disconnect session: %w", err)

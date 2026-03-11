@@ -67,6 +67,15 @@ public sealed partial class CopilotSession : IAsyncDisposable
     private readonly SemaphoreSlim _hooksLock = new(1, 1);
     private SessionRpc? _sessionRpc;
     private int _isDisposed;
+    private CancellationTokenSource? _idleFallbackCts;
+    private readonly object _idleFallbackLock = new();
+
+    /// <summary>
+    /// Grace period before synthesizing a <c>session.idle</c> event after
+    /// <c>assistant.turn_end</c> is received without a subsequent <c>session.idle</c>.
+    /// Defaults to 5 seconds. Exposed as internal for testing.
+    /// </summary>
+    internal TimeSpan IdleFallbackDelay { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// Gets the unique identifier for this session.
@@ -274,12 +283,62 @@ public sealed partial class CopilotSession : IAsyncDisposable
     /// </remarks>
     internal void DispatchEvent(SessionEvent sessionEvent)
     {
+        // Idle fallback: if turn_end arrives but session.idle never follows,
+        // synthesize a session.idle after a grace period so consumers don't hang.
+        if (sessionEvent is AssistantTurnEndEvent)
+        {
+            StartIdleFallbackTimer();
+        }
+        else if (sessionEvent is SessionIdleEvent)
+        {
+            CancelIdleFallbackTimer();
+        }
+
         // Handle broadcast request events (protocol v3) before dispatching to user handlers.
         // Fire-and-forget: the response is sent asynchronously via RPC.
         HandleBroadcastEventAsync(sessionEvent);
 
         // Reading the field once gives us a snapshot; delegates are immutable.
         EventHandlers?.Invoke(sessionEvent);
+    }
+
+    private void StartIdleFallbackTimer()
+    {
+        CancelIdleFallbackTimer();
+        lock (_idleFallbackLock)
+        {
+            var cts = new CancellationTokenSource();
+            _idleFallbackCts = cts;
+            _ = Task.Delay(IdleFallbackDelay, cts.Token).ContinueWith(t =>
+            {
+                if (t.IsCanceled) return;
+                lock (_idleFallbackLock)
+                {
+                    _idleFallbackCts = null;
+                }
+                DispatchEvent(new SessionIdleEvent
+                {
+                    Id = Guid.NewGuid(),
+                    Timestamp = DateTimeOffset.UtcNow,
+                    ParentId = null,
+                    Ephemeral = true,
+                    Data = new SessionIdleData { BackgroundTasks = null }
+                });
+            }, TaskScheduler.Default);
+        }
+    }
+
+    private void CancelIdleFallbackTimer()
+    {
+        lock (_idleFallbackLock)
+        {
+            if (_idleFallbackCts != null)
+            {
+                _idleFallbackCts.Cancel();
+                _idleFallbackCts.Dispose();
+                _idleFallbackCts = null;
+            }
+        }
     }
 
     /// <summary>
@@ -730,6 +789,8 @@ public sealed partial class CopilotSession : IAsyncDisposable
         {
             return;
         }
+
+        CancelIdleFallbackTimer();
 
         try
         {
