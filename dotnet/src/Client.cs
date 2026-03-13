@@ -473,6 +473,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             session.On(config.OnEvent);
         }
         _sessions[sessionId] = session;
+        session.OnDisposed = id => _sessions.TryRemove(id, out _);
 
         try
         {
@@ -587,6 +588,7 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
             session.On(config.OnEvent);
         }
         _sessions[sessionId] = session;
+        session.OnDisposed = id => _sessions.TryRemove(id, out _);
 
         try
         {

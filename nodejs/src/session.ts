@@ -74,6 +74,9 @@ export class CopilotSession {
     private transformCallbacks?: Map<string, SectionTransformFn>;
     private _rpc: ReturnType<typeof createSessionRpc> | null = null;
     private traceContextProvider?: TraceContextProvider;
+    private _isDisposed = false;
+    /** @internal */
+    _onDisposed?: (sessionId: string) => void;
 
     /**
      * Creates a new CopilotSession instance.
@@ -305,6 +308,8 @@ export class CopilotSession {
      * @internal This method is for internal use by the SDK.
      */
     _dispatchEvent(event: SessionEvent): void {
+        if (this._isDisposed) return;
+
         // Handle broadcast request events internally (fire-and-forget)
         this._handleBroadcastEvent(event);
 
@@ -368,6 +373,14 @@ export class CopilotSession {
             };
             if (this.permissionHandler) {
                 void this._executePermissionAndRespond(requestId, permissionRequest);
+            } else {
+                // No handler (e.g. session disposed). Send explicit denial so CLI doesn't hang.
+                void this.rpc.permissions
+                    .handlePendingPermissionRequest({
+                        requestId,
+                        result: { kind: "denied-no-approval-rule-and-could-not-request-from-user" },
+                    })
+                    .catch(() => {});
             }
         }
     }
@@ -425,9 +438,23 @@ export class CopilotSession {
         permissionRequest: PermissionRequest
     ): Promise<void> {
         try {
-            const result = await this.permissionHandler!(permissionRequest, {
+            // Re-check after the await boundary: disconnect() may have run
+            // between the initial guard and the async handler execution.
+            if (this._isDisposed || !this.permissionHandler) {
+                await this.rpc.permissions.handlePendingPermissionRequest({
+                    requestId,
+                    result: {
+                        kind: "denied-no-approval-rule-and-could-not-request-from-user",
+                    },
+                });
+                return;
+            }
+            const result = await this.permissionHandler(permissionRequest, {
                 sessionId: this.sessionId,
             });
+            // Re-check after the handler completes: disconnect() may have run
+            // while the handler was executing.
+            if (this._isDisposed) return;
             if (result.kind === "no-result") {
                 return;
             }
@@ -705,6 +732,11 @@ export class CopilotSession {
      * ```
      */
     async disconnect(): Promise<void> {
+        if (this._isDisposed) return;
+        this._isDisposed = true;
+        this._onDisposed?.(this.sessionId);
+        // Flag is set and map entry removed before the RPC so that events
+        // arriving during the round-trip are never dispatched (fail-closed).
         await this.connection.sendRequest("session.destroy", {
             sessionId: this.sessionId,
         });

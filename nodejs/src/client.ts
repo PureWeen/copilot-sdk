@@ -659,6 +659,7 @@ export class CopilotClient {
             session.on(config.onEvent);
         }
         this.sessions.set(sessionId, session);
+        session._onDisposed = (id) => this.sessions.delete(id);
 
         try {
             const response = await this.connection!.sendRequest("session.create", {
@@ -774,6 +775,7 @@ export class CopilotClient {
             session.on(config.onEvent);
         }
         this.sessions.set(sessionId, session);
+        session._onDisposed = (id) => this.sessions.delete(id);
 
         try {
             const response = await this.connection!.sendRequest("session.resume", {

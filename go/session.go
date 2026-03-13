@@ -66,6 +66,9 @@ type Session struct {
 	hooksMux           sync.RWMutex
 	transformCallbacks map[string]SectionTransformFn
 	transformMu        sync.Mutex
+	isDisposed         bool
+	disposedMux        sync.RWMutex
+	onDisposed         func(string)
 
 	// eventCh serializes user event handler dispatch. dispatchEvent enqueues;
 	// a single goroutine (processEvents) dequeues and invokes handlers in FIFO order.
@@ -506,6 +509,13 @@ func (s *Session) handleSystemMessageTransform(sections map[string]systemMessage
 // are delivered by a single consumer goroutine (processEvents), guaranteeing
 // serial, FIFO dispatch without blocking the read loop.
 func (s *Session) dispatchEvent(event SessionEvent) {
+	s.disposedMux.RLock()
+	if s.isDisposed {
+		s.disposedMux.RUnlock()
+		return
+	}
+	s.disposedMux.RUnlock()
+
 	go s.handleBroadcastEvent(event)
 
 	// Send to the event channel in a closure with a recover guard.
@@ -552,6 +562,15 @@ func (s *Session) processEvents() {
 // event consumer loop) so that a stalled handler does not block event delivery or
 // cause RPC deadlocks.
 func (s *Session) handleBroadcastEvent(event SessionEvent) {
+	// Re-check disposal: this runs in its own goroutine so Disconnect()
+	// may have completed between dispatchEvent's guard and here.
+	s.disposedMux.RLock()
+	if s.isDisposed {
+		s.disposedMux.RUnlock()
+		return
+	}
+	s.disposedMux.RUnlock()
+
 	switch event.Type {
 	case SessionEventTypeExternalToolRequested:
 		requestID := event.Data.RequestID
@@ -583,6 +602,13 @@ func (s *Session) handleBroadcastEvent(event SessionEvent) {
 		}
 		handler := s.getPermissionHandler()
 		if handler == nil {
+			// No handler (e.g. session disposed). Send explicit denial so CLI doesn't hang.
+			s.RPC.Permissions.HandlePendingPermissionRequest(context.Background(), &rpc.SessionPermissionsHandlePendingPermissionRequestParams{
+				RequestID: *requestID,
+				Result: rpc.SessionPermissionsHandlePendingPermissionRequestParamsResult{
+					Kind: rpc.DeniedNoApprovalRuleAndCouldNotRequestFromUser,
+				},
+			})
 			return
 		}
 		s.executePermissionAndRespond(*requestID, *event.Data.PermissionRequest, handler)
@@ -591,6 +617,15 @@ func (s *Session) handleBroadcastEvent(event SessionEvent) {
 
 // executeToolAndRespond executes a tool handler and sends the result back via RPC.
 func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, arguments any, handler ToolHandler, traceparent, tracestate string) {
+	// Re-check after the goroutine boundary: Disconnect() may have run
+	// between the initial guard and the goroutine execution.
+	s.disposedMux.RLock()
+	disposed := s.isDisposed
+	s.disposedMux.RUnlock()
+	if disposed {
+		return
+	}
+
 	ctx := contextWithTraceParent(context.Background(), traceparent, tracestate)
 	defer func() {
 		if r := recover(); r != nil {
@@ -632,6 +667,21 @@ func (s *Session) executeToolAndRespond(requestID, toolName, toolCallID string, 
 
 // executePermissionAndRespond executes a permission handler and sends the result back via RPC.
 func (s *Session) executePermissionAndRespond(requestID string, permissionRequest PermissionRequest, handler PermissionHandlerFunc) {
+	// Re-check after the goroutine boundary: Disconnect() may have run
+	// between the initial guard and the goroutine execution.
+	s.disposedMux.RLock()
+	disposed := s.isDisposed
+	s.disposedMux.RUnlock()
+	if disposed {
+		s.RPC.Permissions.HandlePendingPermissionRequest(context.Background(), &rpc.SessionPermissionsHandlePendingPermissionRequestParams{
+			RequestID: requestID,
+			Result: rpc.SessionPermissionsHandlePendingPermissionRequestParamsResult{
+				Kind: rpc.DeniedNoApprovalRuleAndCouldNotRequestFromUser,
+			},
+		})
+		return
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			s.RPC.Permissions.HandlePendingPermissionRequest(context.Background(), &rpc.SessionPermissionsHandlePendingPermissionRequestParams{
@@ -728,6 +778,21 @@ func (s *Session) GetMessages(ctx context.Context) ([]SessionEvent, error) {
 //	    log.Printf("Failed to disconnect session: %v", err)
 //	}
 func (s *Session) Disconnect() error {
+	// Lock ordering: disposedMux → onDisposed callback (which acquires
+	// sessionsMux in the client). Never reverse this order.
+	s.disposedMux.Lock()
+	if s.isDisposed {
+		s.disposedMux.Unlock()
+		return nil
+	}
+	s.isDisposed = true
+	cb := s.onDisposed
+	s.disposedMux.Unlock()
+	if cb != nil {
+		cb(s.SessionID)
+	}
+	// Flag is set and map entry removed before the RPC so that events
+	// arriving during the round-trip are never dispatched (fail-closed).
 	_, err := s.client.Request("session.destroy", sessionDestroyRequest{SessionID: s.SessionID})
 	if err != nil {
 		return fmt.Errorf("failed to disconnect session: %w", err)

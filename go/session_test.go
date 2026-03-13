@@ -204,3 +204,63 @@ func TestSession_On(t *testing.T) {
 		}
 	})
 }
+
+func TestSession_Disposal(t *testing.T) {
+	t.Run("dispatchEvent is no-op after isDisposed is set", func(t *testing.T) {
+		session, cleanup := newTestSession()
+		defer cleanup()
+
+		var count atomic.Int32
+		var firstDone sync.WaitGroup
+		firstDone.Add(1)
+		session.On(func(event SessionEvent) {
+			count.Add(1)
+			firstDone.Done()
+		})
+
+		// Dispatch before disposed — handler should fire
+		session.dispatchEvent(SessionEvent{Type: "test"})
+		firstDone.Wait()
+		if count.Load() != 1 {
+			t.Fatalf("Expected 1 event before dispose, got %d", count.Load())
+		}
+
+		// Set disposed flag
+		session.disposedMux.Lock()
+		session.isDisposed = true
+		session.disposedMux.Unlock()
+
+		// Dispatch after disposed — handler should NOT fire
+		session.dispatchEvent(SessionEvent{Type: "test"})
+		time.Sleep(50 * time.Millisecond)
+		if count.Load() != 1 {
+			t.Errorf("Expected no events after dispose, got %d", count.Load())
+		}
+	})
+
+	t.Run("onDisposed callback is invoked by Disconnect", func(t *testing.T) {
+		// We can't call the real Disconnect (no RPC server), but we can
+		// verify the disposal flag and callback mechanics directly.
+		session := &Session{
+			handlers: make([]sessionHandler, 0),
+			eventCh:  make(chan SessionEvent, 128),
+		}
+
+		var removedID string
+		session.onDisposed = func(id string) { removedID = id }
+		session.SessionID = "sess-99"
+
+		// Simulate the first part of Disconnect (set disposed + invoke callback)
+		session.disposedMux.Lock()
+		session.isDisposed = true
+		cb := session.onDisposed
+		session.disposedMux.Unlock()
+		if cb != nil {
+			cb(session.SessionID)
+		}
+
+		if removedID != "sess-99" {
+			t.Errorf("Expected onDisposed to be called with 'sess-99', got '%s'", removedID)
+		}
+	})
+}

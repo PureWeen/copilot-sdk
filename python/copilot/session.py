@@ -101,6 +101,8 @@ class CopilotSession:
         self._transform_callbacks: dict[str, SectionTransformFn] | None = None
         self._transform_callbacks_lock = threading.Lock()
         self._rpc: SessionRpc | None = None
+        self._is_disposed = False
+        self._on_disposed: Callable[[str], None] | None = None
 
     @property
     def rpc(self) -> SessionRpc:
@@ -274,6 +276,9 @@ class CopilotSession:
         Args:
             event: The session event to dispatch to all handlers.
         """
+        if self._is_disposed:
+            return
+
         # Handle broadcast request events (protocol v3) before dispatching to user handlers.
         # Fire-and-forget: the response is sent asynchronously via RPC.
         self._handle_broadcast_event(event)
@@ -322,11 +327,27 @@ class CopilotSession:
             with self._permission_handler_lock:
                 perm_handler = self._permission_handler
             if not perm_handler:
-                return  # This client doesn't handle permissions; another client will.
+                # No handler (e.g. session disposed). Send explicit denial so CLI doesn't hang.
+                asyncio.ensure_future(self._send_permission_denial(request_id))
+                return
 
             asyncio.ensure_future(
                 self._execute_permission_and_respond(request_id, permission_request, perm_handler)
             )
+
+    async def _send_permission_denial(self, request_id: str) -> None:
+        """Send an explicit permission denial when no handler is registered."""
+        try:
+            await self.rpc.permissions.handle_pending_permission_request(
+                SessionPermissionsHandlePendingPermissionRequestParams(
+                    request_id=request_id,
+                    result=SessionPermissionsHandlePendingPermissionRequestParamsResult(
+                        kind=Kind.DENIED_NO_APPROVAL_RULE_AND_COULD_NOT_REQUEST_FROM_USER,
+                    ),
+                )
+            )
+        except (JsonRpcError, ProcessExitedError, OSError):
+            pass
 
     async def _execute_tool_and_respond(
         self,
@@ -403,6 +424,12 @@ class CopilotSession:
     ) -> None:
         """Execute a permission handler and respond via RPC."""
         try:
+            # Re-check after the await boundary: disconnect() may have run
+            # between the initial guard and the async handler execution.
+            if self._is_disposed:
+                await self._send_permission_denial(request_id)
+                return
+
             result = handler(permission_request, {"session_id": self.session_id})
             if inspect.isawaitable(result):
                 result = await result
@@ -737,6 +764,14 @@ class CopilotSession:
             >>> # Clean up when done — session can still be resumed later
             >>> await session.disconnect()
         """
+        with self._permission_handler_lock:
+            if self._is_disposed:
+                return
+            self._is_disposed = True
+        if self._on_disposed:
+            self._on_disposed(self.session_id)
+        # Flag is set and map entry removed before the RPC so that events
+        # arriving during the round-trip are never dispatched (fail-closed).
         await self._client.request("session.destroy", {"sessionId": self.session_id})
         with self._event_handlers_lock:
             self._event_handlers.clear()

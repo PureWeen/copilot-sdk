@@ -670,6 +670,12 @@ class CopilotClient:
         with self._sessions_lock:
             self._sessions[session_id] = session
 
+        def _remove_session(sid: str) -> None:
+            with self._sessions_lock:
+                self._sessions.pop(sid, None)
+
+        session._on_disposed = _remove_session
+
         try:
             response = await self._client.request("session.create", payload)
             session._workspace_path = response.get("workspacePath")
@@ -884,6 +890,12 @@ class CopilotClient:
             session.on(on_event)
         with self._sessions_lock:
             self._sessions[session_id] = session
+
+        def _remove_session(sid: str) -> None:
+            with self._sessions_lock:
+                self._sessions.pop(sid, None)
+
+        session._on_disposed = _remove_session
 
         try:
             response = await self._client.request("session.resume", payload)
@@ -1598,7 +1610,8 @@ class CopilotClient:
                 event_dict = params["event"]
                 # Convert dict to SessionEvent object
                 event = session_event_from_dict(event_dict)
-                session = self._sessions.get(session_id)
+                with self._sessions_lock:
+                    session = self._sessions.get(session_id)
                 if session:
                     session._dispatch_event(event)
             elif method == "session.lifecycle":
