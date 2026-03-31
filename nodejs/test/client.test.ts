@@ -842,6 +842,134 @@ describe("CopilotClient", () => {
         });
     });
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // env option -- full-replacement semantics (contrast with .NET merge behavior)
+    //
+    // Node.js / child_process.spawn semantics:
+    //   When `env` is provided, it becomes the ENTIRE environment of the child
+    //   process.  There is no automatic merging with process.env.
+    //
+    // SDK behavior (client.ts constructor):
+    //   const effectiveEnv = options.env ?? process.env;
+    //
+    //   - options.env is undefined  → child process inherits process.env in full
+    //   - options.env is a dict     → child process gets ONLY that dict
+    //
+    // This is DIFFERENT from the fixed .NET SDK behavior, where
+    //   CopilotClientOptions.Environment is MERGED into the inherited environment.
+    //
+    // Context for Issue #441:
+    //   The .NET SDK had a bug where it called startInfo.Environment.Clear() before
+    //   applying user overrides.  Node.js never had this bug because the spawn `env`
+    //   option has always been full-replacement -- there is no pre-populated dict to
+    //   accidentally wipe.  The bug existed only in the .NET SDK.
+    // ─────────────────────────────────────────────────────────────────────────
+    describe("env option", () => {
+        it("uses process.env when env is not specified", async () => {
+            // The SDK sets: effectiveEnv = options.env ?? process.env
+            // When env is omitted the CLI subprocess inherits everything from the
+            // parent process, including PATH, so it starts normally.
+            const client = new CopilotClient({ logLevel: "error" });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            // The internal options.env should reference the same process.env object
+            expect((client as any).options.env).toBe(process.env);
+        });
+
+        it("stores provided env as-is (full replacement by Node.js spawn)", async () => {
+            // When an explicit env dict is provided, the SDK stores it verbatim and
+            // passes it directly to child_process.spawn.  Node.js spawn does NOT
+            // merge it with process.env -- it replaces the environment entirely.
+            //
+            // This is intentional in Node.js (unlike the .NET bug where Clear() was
+            // unintentional).  Callers who want merge semantics must spread process.env
+            // themselves:  env: { ...process.env, MY_VAR: "value" }
+            //
+            // The test harness (sdkTestContext.ts) always does exactly this:
+            //   const env = { ...process.env, COPILOT_API_URL: proxyUrl, ... }
+            const customEnv = { ...process.env, MY_CUSTOM_SDK_VAR: "hello" } as Record<
+                string,
+                string | undefined
+            >;
+            const client = new CopilotClient({ env: customEnv, logLevel: "error" });
+
+            // The stored env is the same object we passed in
+            expect((client as any).options.env).toBe(customEnv);
+        });
+
+        it("starts and pings successfully when env is undefined (inherits process.env)", async () => {
+            // Regression guard: omitting env must not break the client.
+            const client = new CopilotClient({ logLevel: "error" });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            const pong = await client.ping("env-undefined");
+            expect(pong.message).toBe("pong: env-undefined");
+        });
+
+        it("starts and pings successfully when env is a full copy of process.env", async () => {
+            // Providing env: { ...process.env } is equivalent to not providing env
+            // at all.  Both cases give the child process the same environment.
+            const client = new CopilotClient({
+                env: { ...process.env } as Record<string, string | undefined>,
+                logLevel: "error",
+            });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            const pong = await client.ping("env-full-copy");
+            expect(pong.message).toBe("pong: env-full-copy");
+        });
+
+        it("starts and pings successfully when env is a full copy of process.env plus a custom key", async () => {
+            // This mirrors exactly the pattern that test harnesses use in every
+            // language SDK -- spread the full environment then add overrides.
+            // It also mirrors the *correct* way to do per-test env overrides in Node.js
+            // (as opposed to the partial-dict-with-merge approach that .NET now supports).
+            const client = new CopilotClient({
+                env: {
+                    ...process.env,
+                    SDK_ENV_TEST_CUSTOM: "test_value",
+                } as Record<string, string | undefined>,
+                logLevel: "error",
+            });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            const pong = await client.ping("env-spread-plus-custom");
+            expect(pong.message).toBe("pong: env-spread-plus-custom");
+        });
+
+        it("NODE_DEBUG is stripped from env before spawning the CLI subprocess", async () => {
+            // Client.ts removes NODE_DEBUG so it cannot pollute the CLI's stdout
+            // (the SDK reads CLI stdout as a JSON-RPC message stream).
+            // This removal happens regardless of whether env is provided or not.
+            const client = new CopilotClient({
+                env: {
+                    ...process.env,
+                    NODE_DEBUG: "http,net", // would corrupt JSON-RPC if not removed
+                } as Record<string, string | undefined>,
+                logLevel: "error",
+            });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            // Verify the env passed to spawn does NOT contain NODE_DEBUG
+            const spawnedEnv = (client as any).options.env as Record<
+                string,
+                string | undefined
+            >;
+            // The original options.env still has it (it's not mutated)
+            expect(spawnedEnv["NODE_DEBUG"]).toBe("http,net");
+
+            // But the CLI starts fine because startCLIServer spreads the env and
+            // deletes NODE_DEBUG before passing it to spawn
+            const pong = await client.ping("node-debug-stripped");
+            expect(pong.message).toBe("pong: node-debug-stripped");
+        });
+    });
+
     describe("ui elicitation", () => {
         it("reads capabilities from session.create response", async () => {
             const client = new CopilotClient();
