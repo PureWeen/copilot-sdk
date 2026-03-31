@@ -110,7 +110,17 @@ class SubprocessConfig:
     """Log level for the CLI process."""
 
     env: dict[str, str] | None = None
-    """Environment variables for the CLI process. ``None`` inherits the current env."""
+    """Extra environment variables for the CLI process.
+
+    When provided, the specified keys are **merged into** (override or add to) the
+    current ``os.environ``. All other inherited variables (PATH, HOME, etc.) remain
+    intact. When ``None``, the CLI process inherits ``os.environ`` unchanged.
+
+    Example::
+
+        config = ClientConfig(env={"COPILOT_API_URL": "http://proxy:8080"})
+        # PATH and everything else are still inherited
+    """
 
     github_token: str | None = None
     """GitHub token for authentication. Takes priority over other auth methods."""
@@ -793,8 +803,11 @@ class CopilotClient:
         else:
             self._actual_port = None
 
-            # Resolve CLI path: explicit > COPILOT_CLI_PATH env var > bundled binary
-            effective_env = config.env if config.env is not None else os.environ
+            # Resolve CLI path: explicit > COPILOT_CLI_PATH env var (merged) > bundled binary
+            # Build the effective (merged) env early so COPILOT_CLI_PATH lookup sees it.
+            effective_env: dict[str, str] = dict(os.environ)
+            if config.env is not None:
+                effective_env.update(config.env)
             if config.cli_path is None:
                 env_cli_path = effective_env.get("COPILOT_CLI_PATH")
                 if env_cli_path:
@@ -2032,11 +2045,12 @@ class CopilotClient:
         else:
             args = [cli_path] + args
 
-        # Get environment variables
-        if cfg.env is None:
-            env = dict(os.environ)
-        else:
-            env = dict(cfg.env)
+        # Build subprocess environment: start from os.environ, then merge in any
+        # user-provided overrides. This preserves PATH, HOME, and all other inherited
+        # variables when the caller only specifies a few custom keys.
+        env = dict(os.environ)
+        if cfg.env is not None:
+            env.update(cfg.env)
 
         # Set auth token in environment if provided
         if cfg.github_token:

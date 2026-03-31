@@ -112,7 +112,17 @@ export interface CopilotClientOptions {
     autoRestart?: boolean;
 
     /**
-     * Environment variables to pass to the CLI process. If not set, inherits process.env.
+     * Extra environment variables to set for the CLI process.
+     *
+     * When provided, the specified keys are **merged into** (override or add to) the
+     * current `process.env`. All other inherited variables (PATH, HOME, etc.) remain
+     * intact. When not set, the CLI process inherits `process.env` unchanged.
+     *
+     * @example
+     * ```typescript
+     * // Add one override — PATH and everything else are still inherited
+     * const client = new CopilotClient({ env: { COPILOT_API_URL: "http://proxy:8080" } });
+     * ```
      */
     env?: Record<string, string | undefined>;
 
