@@ -139,7 +139,7 @@ Event types: `SessionLifecycleCreated`, `SessionLifecycleDeleted`, `SessionLifec
 - `UseStdio` (bool): Use stdio transport instead of TCP (default: true)
 - `LogLevel` (string): Log level (default: "info")
 - `AutoStart` (\*bool): Auto-start server on first use (default: true). Use `Bool(false)` to disable.
-- `Env` ([]string): Environment variables for CLI process (default: inherits from current process)
+- `Env` ([]string): Full environment for the CLI process as `"KEY=VALUE"` strings (default: inherits from current process when nil). **Unlike the Node.js, Python, and .NET SDKs, the Go SDK uses full-replacement semantics**: when non-nil, this slice becomes the CLI process's complete environment. To add or override specific keys while preserving system variables, start from `os.Environ()`: `env := append(os.Environ(), "MY_KEY=value")`.
 - `GitHubToken` (string): GitHub token for authentication. When provided, takes priority over other auth methods.
 - `UseLoggedInUser` (\*bool): Whether to use logged-in user for authentication (default: true, but false when `GitHubToken` is provided). Cannot be used with `CLIUrl`.
 - `Telemetry` (\*TelemetryConfig): OpenTelemetry configuration for the CLI process. Providing this enables telemetry — no separate flag needed. See [Telemetry](#telemetry) below.
