@@ -200,20 +200,26 @@ public sealed partial class CopilotSession : IAsyncDisposable
     }
 
     /// <summary>
-    /// Sends a message to the Copilot session and waits until the session becomes idle.
+    /// Sends a message to the Copilot session and waits until the session is fully idle.
     /// </summary>
     /// <param name="options">Options for the message to be sent, including the prompt and optional attachments.</param>
     /// <param name="timeout">Timeout duration (default: 60 seconds). Controls how long to wait; does not abort in-flight agent work.</param>
     /// <param name="cancellationToken">A <see cref="CancellationToken"/> that can be used to cancel the operation.</param>
     /// <returns>A task that resolves with the final assistant message event, or null if none was received.</returns>
-    /// <exception cref="TimeoutException">Thrown if the timeout is reached before the session becomes idle.</exception>
+    /// <exception cref="TimeoutException">Thrown if the timeout is reached before the session becomes fully idle.</exception>
     /// <exception cref="OperationCanceledException">Thrown if the <paramref name="cancellationToken"/> is cancelled.</exception>
     /// <exception cref="InvalidOperationException">Thrown if the session has been disposed.</exception>
     /// <remarks>
     /// <para>
     /// This is a convenience method that combines <see cref="SendAsync"/> with waiting for
     /// the <c>session.idle</c> event. Use this when you want to block until the assistant
-    /// has finished processing the message.
+    /// has finished processing the message and all background tasks have completed.
+    /// </para>
+    /// <para>
+    /// <b>Background tasks:</b> When the CLI emits <c>session.idle</c> with a non-empty
+    /// <c>backgroundTasks</c> field, it signals that background agents or shells are still
+    /// running. <see cref="SendAndWaitAsync"/> will continue waiting until a <c>session.idle</c>
+    /// arrives with no active background tasks, or until the timeout fires.
     /// </para>
     /// <para>
     /// Events are still delivered to handlers registered via <see cref="On"/> while waiting.
@@ -243,8 +249,12 @@ public sealed partial class CopilotSession : IAsyncDisposable
                     lastAssistantMessage = assistantMessage;
                     break;
 
-                case SessionIdleEvent:
-                    tcs.TrySetResult(lastAssistantMessage);
+                case SessionIdleEvent idleEvent:
+                    var bgTasks = idleEvent.Data?.BackgroundTasks;
+                    bool hasActiveTasks = bgTasks != null &&
+                        ((bgTasks.Agents?.Length ?? 0) > 0 || (bgTasks.Shells?.Length ?? 0) > 0);
+                    if (!hasActiveTasks)
+                        tcs.TrySetResult(lastAssistantMessage);
                     break;
 
                 case SessionErrorEvent errorEvent:

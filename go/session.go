@@ -150,18 +150,26 @@ func (s *Session) Send(ctx context.Context, options MessageOptions) (string, err
 	return response.MessageID, nil
 }
 
-// SendAndWait sends a message to this session and waits until the session becomes idle.
+// SendAndWait sends a message to this session and waits until the session is fully idle.
 //
 // This is a convenience method that combines [Session.Send] with waiting for
 // the session.idle event. Use this when you want to block until the assistant
-// has finished processing the message.
+// has finished processing the message and all background tasks (background
+// agents and shell commands) have completed.
+//
+// Background tasks: when the CLI emits session.idle with a non-empty
+// BackgroundTasks field it signals that background agents or shells are still
+// running. SendAndWait continues waiting until a session.idle arrives with no
+// active background tasks, or until the context deadline fires.
 //
 // Events are still delivered to handlers registered via [Session.On] while waiting.
 //
 // Parameters:
+//   - ctx: Controls how long to wait. Pass a context with a deadline to set a
+//     custom timeout; if no deadline is set, a default 60-second timeout is
+//     applied. Cancelling the context or reaching the deadline will return an
+//     error — it does not abort in-flight agent work on the CLI side.
 //   - options: The message options including the prompt and optional attachments.
-//   - timeout: How long to wait for completion. Defaults to 60 seconds if zero.
-//     Controls how long to wait; does not abort in-flight agent work.
 //
 // Returns the final assistant message event, or nil if none was received.
 // Returns an error if the timeout is reached or the connection fails.
@@ -197,9 +205,13 @@ func (s *Session) SendAndWait(ctx context.Context, options MessageOptions) (*Ses
 			lastAssistantMessage = &eventCopy
 			mu.Unlock()
 		case SessionEventTypeSessionIdle:
-			select {
-			case idleCh <- struct{}{}:
-			default:
+			bgTasks := event.Data.BackgroundTasks
+			hasActive := bgTasks != nil && (len(bgTasks.Agents) > 0 || len(bgTasks.Shells) > 0)
+			if !hasActive {
+				select {
+				case idleCh <- struct{}{}:
+				default:
+				}
 			}
 		case SessionEventTypeSessionError:
 			errMsg := "session error"

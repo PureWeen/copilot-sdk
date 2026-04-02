@@ -427,6 +427,40 @@ public class SessionTests(E2ETestFixture fixture, ITestOutputHelper output) : E2
         Assert.Null(notFound);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // BackgroundTasks regression tests for PolyPilot#299.
+    //
+    // The fix ensures SendAndWaitAsync only resolves when session.idle arrives
+    // with no active backgroundTasks (agents[] and shells[] both empty/absent).
+    //
+    // Note: The "does NOT resolve with active backgroundTasks" case cannot be
+    // tested through public APIs in .NET because DispatchEvent is internal and
+    // InternalsVisibleTo is not permitted per project conventions.  The
+    // equivalent unit tests (including the failing-before-fix repro) live in
+    // nodejs/test/client.test.ts under "sendAndWait backgroundTasks", and the
+    // Go unit tests in go/session_test.go TestSendAndWait_BackgroundTasks both
+    // cover the same fix logic.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Proves that SendAndWaitAsync resolves when session.idle has no
+    /// backgroundTasks (the normal, clean-idle case after our fix).
+    /// </summary>
+    [Fact]
+    public async Task SendAndWait_Resolves_After_Clean_SessionIdle()
+    {
+        var session = await CreateSessionAsync();
+
+        // A simple prompt that completes quickly — the CLI will emit
+        // session.idle with no backgroundTasks once the turn ends.
+        var result = await session.SendAndWaitAsync(
+            new MessageOptions { Prompt = "What is 1+1?" },
+            TimeSpan.FromSeconds(30));
+
+        Assert.NotNull(result);
+        Assert.Contains("2", result!.Data.Content);
+    }
+
     [Fact]
     public async Task SendAndWait_Throws_On_Timeout()
     {

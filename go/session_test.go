@@ -232,7 +232,7 @@ func TestSession_CommandRouting(t *testing.T) {
 			},
 		})
 
-		// Simulate the dispatch — executeCommandAndRespond will fail on RPC (nil client)
+		// Simulate the dispatch ΓÇö executeCommandAndRespond will fail on RPC (nil client)
 		// but the handler will still be invoked. We test routing only.
 		_, ok := session.getCommandHandler("deploy")
 		if !ok {
@@ -574,7 +574,7 @@ func TestSession_ElicitationRequestSchema(t *testing.T) {
 			"type":       "object",
 			"properties": properties,
 		}
-		// Simulate: if len(schema.Required) > 0 { ... } — with empty required
+		// Simulate: if len(schema.Required) > 0 { ... } ΓÇö with empty required
 		var required []string
 		if len(required) > 0 {
 			requestedSchema["required"] = required
@@ -584,4 +584,252 @@ func TestSession_ElicitationRequestSchema(t *testing.T) {
 			t.Error("Expected no 'required' key when Required is empty")
 		}
 	})
+}
+
+// newTestSessionWithFakeClient creates a Session backed by an in-process fake
+// JSON-RPC 2.0 server that immediately acknowledges any "session.send" call.
+// The returned requestReceived channel is signalled once per incoming request,
+// so tests can synchronize dispatch of follow-up events.
+// The cleanup function must be deferred by the caller.
+func newTestSessionWithFakeClient(t *testing.T) (sess *Session, requestReceived <-chan struct{}, cleanup func()) {
+t.Helper()
+
+stdinR, stdinW := io.Pipe()
+stdoutR, stdoutW := io.Pipe()
+
+client := jsonrpc2.NewClient(stdinW, stdoutR)
+client.Start()
+
+reqCh := make(chan struct{}, 4)
+
+go func() {
+reader := bufio.NewReader(stdinR)
+buf := make([]byte, 8192)
+for {
+var contentLength int
+for {
+line, err := reader.ReadString('\n')
+if err != nil {
+return
+}
+line = strings.TrimSpace(line)
+if line == "" {
+break
+}
+fmt.Sscanf(line, "Content-Length: %d", &contentLength)
+}
+if contentLength == 0 {
+continue
+}
+if contentLength > len(buf) {
+buf = make([]byte, contentLength)
+}
+if _, err := io.ReadFull(reader, buf[:contentLength]); err != nil {
+return
+}
+var req struct {
+ID json.RawMessage `json:"id"`
+}
+json.Unmarshal(buf[:contentLength], &req) //nolint:errcheck
+
+// Signal that a request was received before sending the response,
+// so tests can dispatch events once Send() is in-flight.
+select {
+case reqCh <- struct{}{}:
+default:
+}
+
+result := `{"messageId":"test-msg"}`
+body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":%s}`, req.ID, result)
+header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
+stdoutW.Write([]byte(header + body)) //nolint:errcheck
+}
+}()
+
+s := &Session{
+SessionID: "test-session",
+handlers:  make([]sessionHandler, 0),
+eventCh:   make(chan SessionEvent, 128),
+client:    client,
+}
+go s.processEvents()
+
+cleanupFn := func() {
+stdoutW.Close()
+stdinW.Close()
+client.Stop()
+close(s.eventCh)
+}
+
+return s, reqCh, cleanupFn
+}
+
+// TestSendAndWait_BackgroundTasks verifies the fix for PolyPilot#299:
+// SendAndWait must NOT resolve when session.idle carries active background tasks.
+func TestSendAndWait_BackgroundTasks(t *testing.T) {
+t.Run("does not resolve when session.idle has active background agents", func(t *testing.T) {
+session, requestReceived, cleanup := newTestSessionWithFakeClient(t)
+defer cleanup()
+
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+var resolved atomic.Bool
+done := make(chan struct{})
+go func() {
+defer close(done)
+session.SendAndWait(ctx, MessageOptions{Prompt: "test"}) //nolint:errcheck
+resolved.Store(true)
+}()
+
+// Wait for the fake server to receive the session.send request.
+select {
+case <-requestReceived:
+case <-time.After(2 * time.Second):
+t.Fatal("timeout waiting for session.send request")
+}
+
+// Dispatch session.idle WITH active background agents — must NOT resolve.
+session.dispatchEvent(SessionEvent{
+Type: SessionEventTypeSessionIdle,
+Data: Data{
+BackgroundTasks: &BackgroundTasks{
+Agents: []BackgroundTasksAgent{{AgentID: "bg-1", AgentType: "worker"}},
+Shells: []Shell{},
+},
+},
+})
+
+time.Sleep(100 * time.Millisecond)
+if resolved.Load() {
+t.Error("BUG #299: SendAndWait resolved prematurely while background agents were active")
+}
+
+// Dispatch a clean idle (no background tasks) — now it SHOULD resolve.
+session.dispatchEvent(SessionEvent{
+Type: SessionEventTypeSessionIdle,
+Data: Data{},
+})
+
+select {
+case <-done:
+case <-time.After(2 * time.Second):
+t.Fatal("SendAndWait did not resolve after clean session.idle")
+}
+if !resolved.Load() {
+t.Error("expected SendAndWait to resolve after clean session.idle")
+}
+})
+
+t.Run("does not resolve when session.idle has active background shells", func(t *testing.T) {
+session, requestReceived, cleanup := newTestSessionWithFakeClient(t)
+defer cleanup()
+
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+var resolved atomic.Bool
+done := make(chan struct{})
+go func() {
+defer close(done)
+session.SendAndWait(ctx, MessageOptions{Prompt: "test"}) //nolint:errcheck
+resolved.Store(true)
+}()
+
+select {
+case <-requestReceived:
+case <-time.After(2 * time.Second):
+t.Fatal("timeout waiting for session.send request")
+}
+
+// Dispatch session.idle WITH active background shell — must NOT resolve.
+session.dispatchEvent(SessionEvent{
+Type: SessionEventTypeSessionIdle,
+Data: Data{
+BackgroundTasks: &BackgroundTasks{
+Agents: []BackgroundTasksAgent{},
+Shells: []Shell{{ShellID: "sh-1"}},
+},
+},
+})
+
+time.Sleep(100 * time.Millisecond)
+if resolved.Load() {
+t.Error("BUG #299: SendAndWait resolved prematurely while background shells were active")
+}
+
+// Clean idle — should now resolve.
+session.dispatchEvent(SessionEvent{
+Type: SessionEventTypeSessionIdle,
+Data: Data{BackgroundTasks: &BackgroundTasks{Agents: []BackgroundTasksAgent{}, Shells: []Shell{}}},
+})
+
+select {
+case <-done:
+case <-time.After(2 * time.Second):
+t.Fatal("SendAndWait did not resolve after clean session.idle")
+}
+})
+
+t.Run("resolves when session.idle has no backgroundTasks", func(t *testing.T) {
+session, requestReceived, cleanup := newTestSessionWithFakeClient(t)
+defer cleanup()
+
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+done := make(chan struct{})
+go func() {
+defer close(done)
+session.SendAndWait(ctx, MessageOptions{Prompt: "test"}) //nolint:errcheck
+}()
+
+select {
+case <-requestReceived:
+case <-time.After(2 * time.Second):
+t.Fatal("timeout waiting for session.send request")
+}
+
+session.dispatchEvent(SessionEvent{
+Type: SessionEventTypeSessionIdle,
+Data: Data{},
+})
+
+select {
+case <-done:
+case <-time.After(2 * time.Second):
+t.Fatal("SendAndWait did not resolve when session.idle had no backgroundTasks")
+}
+})
+
+t.Run("resolves when session.idle has empty backgroundTasks arrays", func(t *testing.T) {
+session, requestReceived, cleanup := newTestSessionWithFakeClient(t)
+defer cleanup()
+
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+done := make(chan struct{})
+go func() {
+defer close(done)
+session.SendAndWait(ctx, MessageOptions{Prompt: "test"}) //nolint:errcheck
+}()
+
+select {
+case <-requestReceived:
+case <-time.After(2 * time.Second):
+t.Fatal("timeout waiting for session.send request")
+}
+
+session.dispatchEvent(SessionEvent{
+Type: SessionEventTypeSessionIdle,
+Data: Data{BackgroundTasks: &BackgroundTasks{Agents: []BackgroundTasksAgent{}, Shells: []Shell{}}},
+})
+
+select {
+case <-done:
+case <-time.After(2 * time.Second):
+t.Fatal("SendAndWait did not resolve when backgroundTasks arrays were empty")
+}
+})
 }

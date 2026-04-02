@@ -1077,11 +1077,18 @@ class CopilotSession:
         timeout: float = 60.0,
     ) -> SessionEvent | None:
         """
-        Send a message to this session and wait until the session becomes idle.
+        Send a message to this session and wait until the session is fully idle.
 
         This is a convenience method that combines :meth:`send` with waiting for
         the session.idle event. Use this when you want to block until the assistant
-        has finished processing the message.
+        has finished processing the message and all background tasks (background
+        agents and shell commands) have completed.
+
+        **Background tasks:** When the CLI emits ``session.idle`` with a non-empty
+        ``background_tasks`` field, it signals that background agents or shells are
+        still running. ``send_and_wait`` will continue waiting until a
+        ``session.idle`` arrives with no active background tasks, or until the
+        timeout fires.
 
         Events are still delivered to handlers registered via :meth:`on` while waiting.
 
@@ -1090,13 +1097,14 @@ class CopilotSession:
             attachments: Optional file, directory, or selection attachments.
             mode: Message delivery mode (``"enqueue"`` or ``"immediate"``).
             timeout: Timeout in seconds (default: 60). Controls how long to wait;
-                does not abort in-flight agent work.
+                does not abort in-flight agent work. If background tasks are stuck
+                the timeout will fire.
 
         Returns:
             The final assistant message event, or None if none was received.
 
         Raises:
-            TimeoutError: If the timeout is reached before session becomes idle.
+            TimeoutError: If the timeout is reached before session becomes fully idle.
             Exception: If the session has been disconnected or the connection fails.
 
         Example:
@@ -1113,7 +1121,12 @@ class CopilotSession:
             if event.type == SessionEventType.ASSISTANT_MESSAGE:
                 last_assistant_message = event
             elif event.type == SessionEventType.SESSION_IDLE:
-                idle_event.set()
+                bg_tasks = event.data.background_tasks
+                has_active = bg_tasks is not None and (
+                    len(bg_tasks.agents) > 0 or len(bg_tasks.shells) > 0
+                )
+                if not has_active:
+                    idle_event.set()
             elif event.type == SessionEventType.SESSION_ERROR:
                 error_event = Exception(
                     f"Session error: {getattr(event.data, 'message', str(event.data))}"
