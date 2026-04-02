@@ -118,7 +118,7 @@ class SubprocessConfig:
 
     Example::
 
-        config = ClientConfig(env={"COPILOT_API_URL": "http://proxy:8080"})
+        config = SubprocessConfig(env={"COPILOT_API_URL": "http://proxy:8080"})
         # PATH and everything else are still inherited
     """
 

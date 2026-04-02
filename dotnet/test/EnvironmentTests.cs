@@ -254,7 +254,7 @@ public class EnvironmentTests
     // ── NODE_DEBUG is always stripped ─────────────────────────────────────────
 
     [Fact]
-    public async Task Should_Strip_NODE_DEBUG_Even_When_Environment_Is_Null()
+    public async Task Should_Strip_NODE_DEBUG_When_Environment_Dict_Is_Provided()
     {
         // Client.cs always calls startInfo.Environment.Remove("NODE_DEBUG") after
         // the merge step, so the CLI subprocess never sees NODE_DEBUG regardless of
