@@ -1038,12 +1038,10 @@ describe("CopilotClient", () => {
             onTestFinished(() => sendSpy.mockRestore());
 
             let resolved = false;
-            const promise = session
-                .sendAndWait({ prompt: "hello" }, 5_000)
-                .then((r) => {
-                    resolved = true;
-                    return r;
-                });
+            const promise = session.sendAndWait({ prompt: "hello" }, 5_000).then((r) => {
+                resolved = true;
+                return r;
+            });
 
             await new Promise<void>((r) => setTimeout(r, 20));
 
@@ -1134,12 +1132,10 @@ describe("CopilotClient", () => {
             onTestFinished(() => sendSpy.mockRestore());
 
             let resolved = false;
-            const promise = session
-                .sendAndWait({ prompt: "trigger shell" }, 5_000)
-                .then((r) => {
-                    resolved = true;
-                    return r;
-                });
+            const promise = session.sendAndWait({ prompt: "trigger shell" }, 5_000).then((r) => {
+                resolved = true;
+                return r;
+            });
 
             await new Promise<void>((r) => setTimeout(r, 20));
 
