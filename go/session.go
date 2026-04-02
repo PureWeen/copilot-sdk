@@ -165,10 +165,11 @@ func (s *Session) Send(ctx context.Context, options MessageOptions) (string, err
 // Events are still delivered to handlers registered via [Session.On] while waiting.
 //
 // Parameters:
+//   - ctx: Controls how long to wait. Pass a context with a deadline to set a
+//     custom timeout; if no deadline is set, a default 60-second timeout is
+//     applied. Cancelling the context or reaching the deadline will return an
+//     error — it does not abort in-flight agent work on the CLI side.
 //   - options: The message options including the prompt and optional attachments.
-//   - timeout: How long to wait for completion. Defaults to 60 seconds if zero.
-//     Controls how long to wait; does not abort in-flight agent work. If
-//     background tasks are stuck the context deadline will fire.
 //
 // Returns the final assistant message event, or nil if none was received.
 // Returns an error if the timeout is reached or the connection fails.

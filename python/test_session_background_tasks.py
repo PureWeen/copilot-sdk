@@ -10,7 +10,6 @@ the send() method, and dispatch synthetic events via _dispatch_event().
 
 import asyncio
 import threading
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
