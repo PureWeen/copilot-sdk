@@ -1176,5 +1176,51 @@ describe("CopilotClient", () => {
             await promise;
             expect(resolved).toBe(true);
         });
+
+        it("times out when session.idle always reports active backgroundTasks and clean idle never arrives", async () => {
+            const client = new CopilotClient({ logLevel: "error" });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+            const session = await client.createSession({ onPermissionRequest: approveAll });
+
+            const sendSpy = vi
+                .spyOn((client as any).connection!, "sendRequest")
+                .mockImplementation(async (method: string) => {
+                    if (method === "session.send") return { messageId: "mock-stuck-bg" };
+                    throw new Error(`Unexpected RPC: ${method}`);
+                });
+            onTestFinished(() => sendSpy.mockRestore());
+
+            // Use a short timeout so the test finishes quickly
+            const SHORT_TIMEOUT = 300;
+
+            const promise = session.sendAndWait(
+                { prompt: "trigger stuck background" },
+                SHORT_TIMEOUT
+            );
+
+            await new Promise<void>((r) => setTimeout(r, 20));
+
+            // Dispatch session.idle with active background agents — and never send a clean idle.
+            // sendAndWait must NOT resolve; it must time out instead.
+            (session as any)._dispatchEvent({
+                id: "evt-stuck-bg-idle",
+                timestamp: new Date().toISOString(),
+                parentId: null,
+                ephemeral: true,
+                type: "session.idle",
+                data: {
+                    backgroundTasks: {
+                        agents: [{ agentId: "stuck-agent", agentType: "worker" }],
+                        shells: [],
+                    },
+                },
+            });
+
+            // The promise must reject with a timeout error, not resolve
+            await expect(promise).rejects.toThrow(
+                `Timeout after ${SHORT_TIMEOUT}ms waiting for session.idle`
+            );
+        });
     });
 });

@@ -189,19 +189,28 @@ export class CopilotSession {
     }
 
     /**
-     * Sends a message to this session and waits until the session becomes idle.
+     * Sends a message to this session and waits until the session is fully idle.
      *
      * This is a convenience method that combines {@link send} with waiting for
      * the `session.idle` event. Use this when you want to block until the
-     * assistant has finished processing the message.
+     * assistant has finished processing the message and all background tasks
+     * (background agents and shell commands) have completed.
+     *
+     * **Background tasks:** When the CLI emits `session.idle` with a non-empty
+     * `backgroundTasks` field, it signals that background agents or shells are
+     * still running. `sendAndWait` will continue waiting until a `session.idle`
+     * arrives with no active background tasks (or until the timeout fires).
      *
      * Events are still delivered to handlers registered via {@link on} while waiting.
      *
      * @param options - The message options including the prompt and optional attachments
-     * @param timeout - Timeout in milliseconds (default: 60000). Controls how long to wait; does not abort in-flight agent work.
-     * @returns A promise that resolves with the final assistant message when the session becomes idle,
-     *          or undefined if no assistant message was received
-     * @throws Error if the timeout is reached before the session becomes idle
+     * @param timeout - Timeout in milliseconds (default: 60000). Controls how long to wait;
+     *                  does not abort in-flight agent work. If background tasks are stuck
+     *                  the timeout will fire and reject the promise.
+     * @returns A promise that resolves with the final assistant message when the session is
+     *          fully idle (no active background tasks), or undefined if no assistant message
+     *          was received
+     * @throws Error if the timeout is reached before the session becomes fully idle
      * @throws Error if the session has been disconnected or the connection fails
      *
      * @example
