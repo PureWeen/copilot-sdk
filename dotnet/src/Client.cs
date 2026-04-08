@@ -82,6 +82,23 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
     private ServerRpc? _rpc;
 
     /// <summary>
+    /// Event raised when the JSON-RPC connection to the Copilot CLI is lost.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This event fires when the underlying TCP/stdio connection drops unexpectedly
+    /// (e.g., server process crash, network interruption, idle timeout). It does NOT
+    /// fire during normal disposal via <see cref="StopAsync"/> or <see cref="DisposeAsync"/>.
+    /// </para>
+    /// <para>
+    /// After this event fires, all active sessions on this client have dead event streams.
+    /// The client should be disposed and recreated, or the application should call
+    /// <see cref="StopAsync"/> followed by <see cref="StartAsync"/> to reconnect.
+    /// </para>
+    /// </remarks>
+    public event Action? OnDisconnected;
+
+    /// <summary>
     /// Gets the typed RPC client for server-scoped methods (no session required).
     /// </summary>
     /// <remarks>
@@ -1320,7 +1337,13 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         rpc.StartListening();
 
         // Transition state to Disconnected if the JSON-RPC connection drops
-        _ = rpc.Completion.ContinueWith(_ => _disconnected = true, TaskScheduler.Default);
+        _ = rpc.Completion.ContinueWith(t =>
+        {
+            if (_disposed) return; // Don't fire during normal disposal
+            _disconnected = true;
+            try { OnDisconnected?.Invoke(); }
+            catch { /* Don't let handler exceptions propagate */ }
+        }, TaskScheduler.Default);
 
         _rpc = new ServerRpc(rpc);
 
