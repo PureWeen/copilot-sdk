@@ -99,6 +99,11 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
     public event Action? OnDisconnected;
 
     /// <summary>
+    /// Event raised when the client has successfully auto-reconnected after a connection drop.
+    /// </summary>
+    public event Action? OnReconnected;
+
+    /// <summary>
     /// Gets the typed RPC client for server-scoped methods (no session required).
     /// </summary>
     /// <remarks>
@@ -340,6 +345,36 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         {
             throw new AggregateException(errors);
         }
+    }
+
+    /// <summary>
+    /// Reconnects to an external TCP server after a connection drop.
+    /// Sessions remain registered but need re-resuming by the caller.
+    /// </summary>
+    private async Task ReconnectAsync(string host, int port)
+    {
+        if (_connectionTask != null)
+        {
+            try
+            {
+                var oldCtx = await _connectionTask;
+                try { oldCtx.Rpc.Dispose(); } catch { }
+                if (oldCtx.NetworkStream != null) try { await oldCtx.NetworkStream.DisposeAsync(); } catch { }
+                if (oldCtx.TcpClient != null) try { oldCtx.TcpClient.Dispose(); } catch { }
+            }
+            catch { }
+            _connectionTask = null;
+            _rpc = null;
+        }
+
+        var connection = await ConnectToServerAsync(null, host, port, null, CancellationToken.None);
+        await VerifyProtocolVersionAsync(connection, CancellationToken.None);
+        _connectionTask = Task.FromResult(connection);
+        _disconnected = false;
+
+        _logger.LogDebug("Auto-reconnected to server");
+        try { OnReconnected?.Invoke(); }
+        catch { }
     }
 
     private async Task CleanupConnectionAsync(List<Exception>? errors)
@@ -1336,13 +1371,29 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
         rpc.AddLocalRpcMethod("systemMessage.transform", handler.OnSystemMessageTransform);
         rpc.StartListening();
 
-        // Transition state to Disconnected if the JSON-RPC connection drops
-        _ = rpc.Completion.ContinueWith(t =>
+        // Transition state to Disconnected if the JSON-RPC connection drops.
+        // For external TCP servers, attempt automatic reconnection.
+        _ = rpc.Completion.ContinueWith(async t =>
         {
-            if (_disposed) return; // Don't fire during normal disposal
+            if (_disposed) return;
             _disconnected = true;
+
+            if (cliProcess == null && tcpHost != null && tcpPort != null)
+            {
+                _logger.LogDebug("Connection lost — attempting auto-reconnect");
+                try
+                {
+                    await ReconnectAsync(tcpHost, tcpPort.Value);
+                    return;
+                }
+                catch
+                {
+                    _logger.LogDebug("Auto-reconnect failed");
+                }
+            }
+
             try { OnDisconnected?.Invoke(); }
-            catch { /* Don't let handler exceptions propagate */ }
+            catch { }
         }, TaskScheduler.Default);
 
         _rpc = new ServerRpc(rpc);
