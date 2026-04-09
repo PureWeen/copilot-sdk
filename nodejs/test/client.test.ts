@@ -870,6 +870,120 @@ describe("CopilotClient", () => {
         });
     });
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // env option -- merge semantics (consistent with .NET and Python SDKs)
+    //
+    // SDK behavior (client.ts constructor):
+    //   const effectiveEnv = options.env ? { ...process.env, ...options.env } : process.env;
+    //
+    //   - options.env is undefined  → effectiveEnv is process.env (by reference)
+    //   - options.env is a dict     → effectiveEnv is process.env MERGED WITH options.env
+    //                                 (user keys override, all inherited vars stay)
+    //
+    // This matches .NET (Environment merge-override) and Python (dict(os.environ) + update).
+    //
+    // Context for Issue #441:
+    //   The .NET SDK had a bug where startInfo.Environment.Clear() wiped PATH and all other
+    //   inherited vars when the user provided even ONE custom env key.  After fixing that,
+    //   we aligned Node.js and Python to the same merge semantics so that providing a
+    //   partial dict (e.g. { COPILOT_API_URL: "..." }) works correctly in all SDKs.
+    // ─────────────────────────────────────────────────────────────────────────
+    describe("env option", () => {
+        it("uses process.env by reference when env is not specified", async () => {
+            // When env is omitted, effectiveEnv = process.env (falsy branch of ternary).
+            // The CLI subprocess inherits everything from the parent process.
+            const client = new CopilotClient({ logLevel: "error" });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            // Internal options.env should be the same process.env reference
+            expect((client as any).options.env).toBe(process.env);
+        });
+
+        it("merges provided env keys into process.env (does not replace entirely)", async () => {
+            // When an explicit env dict is provided, the SDK creates a merged object:
+            //   { ...process.env, ...options.env }
+            // This means PATH, HOME, and all other inherited variables are preserved
+            // while the user's keys override or add to them.
+            //
+            // The test harness pattern (sdkTestContext.ts) spreads process.env anyway:
+            //   { ...process.env, COPILOT_API_URL: proxyUrl, ... }
+            // Under merge semantics this becomes:
+            //   { ...process.env, ...{ ...process.env, COPILOT_API_URL: proxyUrl } }
+            //   = { ...process.env, COPILOT_API_URL: proxyUrl }   ← same result, backward-compatible.
+            const customEnv = { MY_CUSTOM_SDK_VAR: "hello" } as Record<string, string>;
+            const client = new CopilotClient({ env: customEnv, logLevel: "error" });
+
+            // The stored env is the MERGED result, not the original customEnv object
+            const storedEnv = (client as any).options.env as Record<string, string | undefined>;
+            expect(storedEnv).not.toBe(customEnv); // it's a new merged object
+            expect(storedEnv["MY_CUSTOM_SDK_VAR"]).toBe("hello"); // user key is present
+            expect(storedEnv["PATH"]).toBe(process.env["PATH"]); // inherited key is preserved
+        });
+
+        it("starts and pings successfully when env is undefined (inherits process.env)", async () => {
+            // Regression guard: omitting env must not break the client.
+            const client = new CopilotClient({ logLevel: "error" });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            const pong = await client.ping("env-undefined");
+            expect(pong.message).toBe("pong: env-undefined");
+        });
+
+        it("starts and pings successfully when env is a partial dict with one custom key", async () => {
+            // Core merge-semantics test: providing just { MY_VAR: "value" } keeps PATH
+            // and all other inherited vars, so the CLI subprocess starts normally.
+            // Before the Issue #441 fix, this pattern would have crashed the CLI in .NET.
+            // After aligning all SDKs, it works correctly everywhere.
+            const client = new CopilotClient({
+                env: { SDK_ENV_TEST_CUSTOM: "test_value" },
+                logLevel: "error",
+            });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            const pong = await client.ping("env-partial-dict");
+            expect(pong.message).toBe("pong: env-partial-dict");
+        });
+
+        it("starts and pings successfully when env is a full copy of process.env plus a custom key", async () => {
+            // The test-harness spread pattern still works under merge semantics.
+            // { ...process.env, MY_KEY: "val" } merged with process.env = same dict.
+            const client = new CopilotClient({
+                env: {
+                    ...process.env,
+                    SDK_ENV_TEST_CUSTOM: "test_value",
+                } as Record<string, string | undefined>,
+                logLevel: "error",
+            });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            const pong = await client.ping("env-spread-plus-custom");
+            expect(pong.message).toBe("pong: env-spread-plus-custom");
+        });
+
+        it("NODE_DEBUG is stripped from merged env before spawning the CLI subprocess", async () => {
+            // The SDK always removes NODE_DEBUG from the effective env before spawn so it
+            // cannot corrupt the JSON-RPC message stream (CLI stdout).
+            const client = new CopilotClient({
+                env: { NODE_DEBUG: "http,net" } as Record<string, string | undefined>,
+                logLevel: "error",
+            });
+            await client.start();
+            onTestFinished(() => client.forceStop());
+
+            // The merged env stored in options.env contains NODE_DEBUG (from our override)
+            const storedEnv = (client as any).options.env as Record<string, string | undefined>;
+            expect(storedEnv["NODE_DEBUG"]).toBe("http,net");
+
+            // But the CLI starts fine because startCLIServer removes NODE_DEBUG before spawn
+            const pong = await client.ping("node-debug-stripped");
+            expect(pong.message).toBe("pong: node-debug-stripped");
+        });
+    });
+
     describe("ui elicitation", () => {
         it("reads capabilities from session.create response", async () => {
             const client = new CopilotClient();

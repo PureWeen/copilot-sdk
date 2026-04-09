@@ -1194,7 +1194,6 @@ public sealed partial class CopilotClient : IDisposable, IAsyncDisposable
 
         if (options.Environment != null)
         {
-            startInfo.Environment.Clear();
             foreach (var (key, value) in options.Environment)
             {
                 startInfo.Environment[key] = value;

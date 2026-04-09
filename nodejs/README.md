@@ -86,6 +86,7 @@ new CopilotClient(options?: CopilotClientOptions)
 - `useStdio?: boolean` - Use stdio transport instead of TCP (default: true)
 - `logLevel?: string` - Log level (default: "info")
 - `autoStart?: boolean` - Auto-start server (default: true)
+- `env?: Record<string, string | undefined>` - Extra environment variables for the CLI process. Specified keys are **merged into** `process.env` (they override or add to inherited variables; all other variables remain intact). Pass `undefined` as a value to unset an inherited variable (e.g., `{ NODE_DEBUG: undefined }`). When not set, the CLI process inherits `process.env` unchanged.
 - `githubToken?: string` - GitHub token for authentication. When provided, takes priority over other auth methods.
 - `useLoggedInUser?: boolean` - Whether to use logged-in user for authentication (default: true, but false when `githubToken` is provided). Cannot be used with `cliUrl`.
 - `telemetry?: TelemetryConfig` - OpenTelemetry configuration for the CLI process. Providing this object enables telemetry — no separate flag needed. See [Telemetry](#telemetry) below.

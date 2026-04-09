@@ -317,7 +317,10 @@ export class CopilotClient {
         this.onGetTraceContext = options.onGetTraceContext;
         this.sessionFsConfig = options.sessionFs ?? null;
 
-        const effectiveEnv = options.env ?? process.env;
+        // Merge user-provided env overrides into the current process environment.
+        // Providing a partial dict (e.g. { COPILOT_API_URL: "..." }) adds/overrides
+        // those keys while keeping PATH, HOME, and all other inherited variables intact.
+        const effectiveEnv = options.env ? { ...process.env, ...options.env } : process.env;
         this.options = {
             cliPath: options.cliUrl
                 ? undefined
