@@ -711,6 +711,7 @@ export class CopilotClient {
             session.on(config.onEvent);
         }
         this.sessions.set(sessionId, session);
+        session.onDisposed = (id) => this.sessions.delete(id);
         if (this.sessionFsConfig) {
             if (config.createSessionFsHandler) {
                 session.clientSessionApis.sessionFs = createSessionFsAdapter(
@@ -852,6 +853,7 @@ export class CopilotClient {
             session.on(config.onEvent);
         }
         this.sessions.set(sessionId, session);
+        session.onDisposed = (id) => this.sessions.delete(id);
         if (this.sessionFsConfig) {
             if (config.createSessionFsHandler) {
                 session.clientSessionApis.sessionFs = createSessionFsAdapter(

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/github/copilot-sdk/go/internal/jsonrpc2"
@@ -73,6 +74,14 @@ type Session struct {
 	elicitationMu      sync.RWMutex
 	capabilities       SessionCapabilities
 	capabilitiesMu     sync.RWMutex
+
+	// disconnected is set atomically to 1 by Disconnect. Guards dispatchEvent
+	// so that events arriving after disconnect are silently dropped.
+	disconnected atomic.Int32
+
+	// onDisposed is called by Disconnect so the owning Client can remove the
+	// session from its sessions map before the RPC round-trip. Set by Client.
+	onDisposed func(sessionID string)
 
 	// eventCh serializes user event handler dispatch. dispatchEvent enqueues;
 	// a single goroutine (processEvents) dequeues and invokes handlers in FIFO order.
@@ -841,6 +850,11 @@ func fromRPCElicitationResult(r *rpc.UIElicitationResponse) *ElicitationResult {
 // are delivered by a single consumer goroutine (processEvents), guaranteeing
 // serial, FIFO dispatch without blocking the read loop.
 func (s *Session) dispatchEvent(event SessionEvent) {
+	// Guard: do not dispatch events to a disconnected session.
+	if s.disconnected.Load() != 0 {
+		return
+	}
+
 	go s.handleBroadcastEvent(event)
 
 	// Send to the event channel in a closure with a recover guard.
@@ -908,6 +922,15 @@ func (s *Session) handleBroadcastEvent(event SessionEvent) {
 		}
 		handler := s.getPermissionHandler()
 		if handler == nil {
+			// No handler registered (e.g. session disconnected or single-client
+			// headless mode). Send an explicit denial so the CLI server does not
+			// hang waiting indefinitely for a response.
+			s.RPC.Permissions.HandlePendingPermissionRequest(context.Background(), &rpc.PermissionDecisionRequest{
+				RequestID: d.RequestID,
+				Result: rpc.PermissionDecision{
+					Kind: rpc.PermissionDecisionKindDeniedNoApprovalRuleAndCouldNotRequestFromUser,
+				},
+			})
 			return
 		}
 		s.executePermissionAndRespond(d.RequestID, d.PermissionRequest, handler)
@@ -1120,6 +1143,16 @@ func (s *Session) GetMessages(ctx context.Context) ([]SessionEvent, error) {
 //	    log.Printf("Failed to disconnect session: %v", err)
 //	}
 func (s *Session) Disconnect() error {
+	// Mark disconnected before the RPC round-trip so that events arriving
+	// during the round-trip are never dispatched (fail-closed).
+	s.disconnected.Store(1)
+
+	// Remove from client's session map before the RPC so the client stops
+	// routing events to this session.
+	if s.onDisposed != nil {
+		s.onDisposed(s.SessionID)
+	}
+
 	_, err := s.client.Request("session.destroy", sessionDestroyRequest{SessionID: s.SessionID})
 	if err != nil {
 		return fmt.Errorf("failed to disconnect session: %w", err)
