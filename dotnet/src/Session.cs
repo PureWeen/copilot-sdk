@@ -73,6 +73,12 @@ public sealed partial class CopilotSession : IAsyncDisposable
     private int _isDisposed;
 
     /// <summary>
+    /// Callback invoked when this session is disposed, so the owning client can
+    /// remove it from its session map. Set by <see cref="CopilotClient"/>.
+    /// </summary>
+    internal Action<string>? OnDisposed { get; set; }
+
+    /// <summary>
     /// Channel that serializes event dispatch. <see cref="DispatchEvent"/> enqueues;
     /// a single background consumer (<see cref="ProcessEventsAsync"/>) dequeues and
     /// invokes handlers one at a time, preserving arrival order.
@@ -327,6 +333,10 @@ public sealed partial class CopilotSession : IAsyncDisposable
     /// </remarks>
     internal void DispatchEvent(SessionEvent sessionEvent)
     {
+        // Guard: do not dispatch events to a disposed session.
+        if (Volatile.Read(ref _isDisposed) == 1)
+            return;
+
         // Fire broadcast work concurrently (fire-and-forget with error logging).
         // This is done outside the channel so broadcast handlers don't block the
         // consumer loop — important when a secondary client's handler intentionally
@@ -464,7 +474,20 @@ public sealed partial class CopilotSession : IAsyncDisposable
 
                         var handler = _permissionHandler;
                         if (handler is null)
-                            return; // This client doesn't handle permissions; another client will.
+                        {
+                            // No handler registered (e.g. session disposed or single-client
+                            // headless mode). Send an explicit denial so the CLI server does
+                            // not hang waiting indefinitely for a response.
+                            try
+                            {
+                                await Rpc.Permissions.HandlePendingPermissionRequestAsync(data.RequestId, new PermissionDecision
+                                {
+                                    Kind = PermissionRequestResultKind.DeniedCouldNotRequestFromUser.Value
+                                });
+                            }
+                            catch (Exception) { /* best-effort denial — swallow connection/RPC errors */ }
+                            return;
+                        }
 
                         await ExecutePermissionAndRespondAsync(data.RequestId, data.PermissionRequest, handler);
                         break;
@@ -1185,6 +1208,10 @@ public sealed partial class CopilotSession : IAsyncDisposable
         {
             return;
         }
+
+        // Remove from client's session map before the RPC so that events
+        // arriving during the round-trip are never dispatched (fail-closed).
+        OnDisposed?.Invoke(SessionId);
 
         _eventChannel.Writer.TryComplete();
 
