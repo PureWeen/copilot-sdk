@@ -89,6 +89,14 @@ export class CopilotSession {
     private _rpc: ReturnType<typeof createSessionRpc> | null = null;
     private traceContextProvider?: TraceContextProvider;
     private _capabilities: SessionCapabilities = {};
+    private _disposed = false;
+
+    /**
+     * Callback invoked when this session is disposed, so the owning client can
+     * remove it from its session map. Set by {@link CopilotClient}.
+     * @internal
+     */
+    onDisposed?: (sessionId: string) => void;
 
     /** @internal Client session API handlers, populated by CopilotClient during create/resume. */
     clientSessionApis: ClientSessionApiHandlers = {};
@@ -353,6 +361,9 @@ export class CopilotSession {
      * @internal This method is for internal use by the SDK.
      */
     _dispatchEvent(event: SessionEvent): void {
+        // Guard: do not dispatch events to a disposed session.
+        if (this._disposed) return;
+
         // Handle broadcast request events internally (fire-and-forget)
         this._handleBroadcastEvent(event);
 
@@ -421,6 +432,8 @@ export class CopilotSession {
             if (this.permissionHandler) {
                 void this._executePermissionAndRespond(requestId, permissionRequest);
             }
+            // No handler registered (e.g. session disposed or single-client headless mode).
+            // Another client will handle it (multi-client scenario) or the request will timeout.
         } else if (event.type === "command.execute") {
             const { requestId, commandName, command, args } = event.data as {
                 requestId: string;
@@ -965,13 +978,29 @@ export class CopilotSession {
      * ```
      */
     async disconnect(): Promise<void> {
-        await this.connection.sendRequest("session.destroy", {
-            sessionId: this.sessionId,
-        });
-        this.eventHandlers.clear();
-        this.typedEventHandlers.clear();
-        this.toolHandlers.clear();
-        this.permissionHandler = undefined;
+        if (this._disposed) return;
+        this._disposed = true;
+
+        // Remove from client's session map before the RPC so that events
+        // arriving during the round-trip are never dispatched (fail-closed).
+        this.onDisposed?.(this.sessionId);
+
+        try {
+            await this.connection.sendRequest("session.destroy", {
+                sessionId: this.sessionId,
+            });
+        } catch {
+            // Connection already closed
+        } finally {
+            // Always clean up handlers
+            this.eventHandlers.clear();
+            this.typedEventHandlers.clear();
+            this.toolHandlers.clear();
+            this.commandHandlers.clear();
+            this.permissionHandler = undefined;
+            this.elicitationHandler = undefined;
+            this.userInputHandler = undefined;
+        }
     }
 
     /**

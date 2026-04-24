@@ -248,4 +248,45 @@ public class PermissionTests(E2ETestFixture fixture, ITestOutputHelper output) :
 
         Assert.True(receivedToolCallId, "Should have received toolCallId in permission request");
     }
+
+    /// <summary>
+    /// Validates that disposing a session does not affect subsequent sessions on the same client.
+    /// After session A is disposed, session B should handle permissions and complete tool calls normally.
+    /// This exercises the OnDisposed cleanup path that removes disposed sessions from the client map.
+    /// </summary>
+    [Fact]
+    public async Task Should_Handle_Permission_After_Prior_Session_Disposed()
+    {
+        // Create and use session A
+        var session1 = await CreateSessionAsync(new SessionConfig
+        {
+            OnPermissionRequest = (request, invocation) =>
+                Task.FromResult(new PermissionRequestResult { Kind = PermissionRequestResultKind.Approved })
+        });
+
+        await session1.SendAndWaitAsync(new MessageOptions { Prompt = "What is 1+1?" });
+
+        // Dispose session A — exercises the OnDisposed callback that removes it from the client map
+        await session1.DisposeAsync();
+
+        // Create session B on the same client — should work normally
+        var session2PermissionReceived = false;
+        var session2 = await CreateSessionAsync(new SessionConfig
+        {
+            OnPermissionRequest = (request, invocation) =>
+            {
+                session2PermissionReceived = true;
+                return Task.FromResult(new PermissionRequestResult { Kind = PermissionRequestResultKind.Approved });
+            }
+        });
+
+        // Session B should handle permissions and complete normally
+        await session2.SendAndWaitAsync(new MessageOptions
+        {
+            Prompt = "Run 'echo hello' for me"
+        }, timeout: TimeSpan.FromSeconds(15));
+
+        Assert.True(session2PermissionReceived,
+            "Session B's permission handler should fire normally after session A was disposed.");
+    }
 }

@@ -672,6 +672,11 @@ func (c *Client) CreateSession(ctx context.Context, config *SessionConfig) (*Ses
 	c.sessionsMux.Lock()
 	c.sessions[sessionID] = session
 	c.sessionsMux.Unlock()
+	session.onDisposed = func(id string) {
+		c.sessionsMux.Lock()
+		delete(c.sessions, id)
+		c.sessionsMux.Unlock()
+	}
 
 	if c.options.SessionFs != nil {
 		if config.CreateSessionFsHandler == nil {
@@ -831,6 +836,11 @@ func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string,
 	c.sessionsMux.Lock()
 	c.sessions[sessionID] = session
 	c.sessionsMux.Unlock()
+	session.onDisposed = func(id string) {
+		c.sessionsMux.Lock()
+		delete(c.sessions, id)
+		c.sessionsMux.Unlock()
+	}
 
 	if c.options.SessionFs != nil {
 		if config.CreateSessionFsHandler == nil {
