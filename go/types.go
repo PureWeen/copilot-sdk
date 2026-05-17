@@ -42,11 +42,24 @@ type ClientOptions struct {
 	AutoStart *bool
 	// Deprecated: AutoRestart has no effect and will be removed in a future release.
 	AutoRestart *bool
-	// Env is the environment variables for the CLI process (default: inherits from current process).
-	// Each entry is of the form "key=value".
-	// If Env is nil, the new process uses the current process's environment.
-	// If Env contains duplicate environment keys, only the last value in the
-	// slice for each duplicate key is used.
+	// Env specifies the full environment for the CLI process. Each entry must be
+	// of the form "key=value".
+	//
+	// If Env is nil (the default), the CLI process inherits the current process's
+	// environment unchanged.
+	//
+	// If Env is non-nil, it becomes the COMPLETE environment of the CLI process —
+	// variables not listed here are NOT inherited. To add or override a few keys
+	// while preserving PATH and other system variables, start from os.Environ():
+	//
+	//	env := append(os.Environ(), "COPILOT_API_URL=http://proxy:8080")
+	//
+	// Note: the Go SDK behaves differently from the Node.js, Python, and .NET SDKs,
+	// which automatically merge user-provided keys into the inherited environment.
+	// In Go, the []string format makes full replacement the natural choice; callers
+	// must explicitly include inherited variables when partial overrides are needed.
+	//
+	// If Env contains duplicate keys, only the last value for each key is used.
 	Env []string
 	// GitHubToken is the GitHub token to use for authentication.
 	// When provided, the token is passed to the CLI server via environment variable.
